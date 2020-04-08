@@ -188,7 +188,7 @@ local setkeepalive
 
 
 local function connect(config)
-  local phase  = get_phase(kong)
+  local phase  = get_phase()
   if phase == "init" or phase == "init_worker" or ngx.IS_CLI then
     -- Force LuaSocket usage in the CLI in order to allow for self-signed
     -- certificates to be trusted (via opts.cafile) in the resty-cli
@@ -387,12 +387,13 @@ end
 
 
 function _mt:connect(operation)
-  if operation ~= nil and operation ~= "read" and operation ~= "write" then
-    error("operation must be 'read' or 'write', was: " .. tostring(operation), 2)
-  end
-
-  if not operation or not self.config_ro then
-    operation = "write"
+  if  operation ~= nil
+    and operation ~= "read"
+    and operation ~= "write"
+    and operation ~= "admin"
+    and operation ~= "migration"
+  then
+    error("operation must be 'read', 'write', 'admin' or 'migration', was: " .. tostring(operation), 2)
   end
 
   local conn = self:get_stored_connection(operation)
@@ -400,8 +401,16 @@ function _mt:connect(operation)
     return conn
   end
 
-  local connection, err = connect(operation == "write" and
-                                  self.config or self.config_ro)
+  local config
+  if operation == "read" then
+    config = self.config_ro
+  elseif operation == "admin" then
+    config = self.config_adm
+  elseif operation == "migration" then
+    config = self.config_mig
+  end
+
+  local connection, err = connect(config or self.config)
   if not connection then
     return nil, err
   end
@@ -413,7 +422,7 @@ end
 
 
 function _mt:connect_migrations()
-  return self:connect("write")
+  return self:connect("migration")
 end
 
 
@@ -497,7 +506,7 @@ function _mt:query(sql, operation)
     error("operation must be 'read' or 'write', was: " .. tostring(operation), 2)
   end
 
-  local phase  = get_phase(kong)
+  local phase  = get_phase()
 
   if not operation or
      not self.config_ro or
@@ -975,7 +984,7 @@ function _M.new(kong_config)
       local err
       sem, err = semaphore.new(config_ro.sem_max)
       if not sem then
-        ngx.log(ngx.CRIT, "failed creating the PostgreSQL connector semaphore: ",
+        ngx.log(ngx.CRIT, "failed creating the PostgreSQL read-only connector semaphore: ",
                           err)
       end
     end
@@ -983,6 +992,36 @@ function _M.new(kong_config)
     self.config_ro = config_ro
     self.sem_read = sem
   end
+
+  local mig_override = {
+    user     = kong_config.pg_migration_user,
+    password = kong_config.pg_migration_password,
+  }
+
+  local config_mig = utils.table_merge(config, mig_override)
+  local sem_migration, err = semaphore.new(1)
+  if not sem_migration then
+    ngx.log(ngx.CRIT, "failed creating the PostgreSQL migration connector semaphore: ",
+                      err)
+  end
+
+  self.config_mig = config_mig
+  self.sem_migration = sem_migration
+
+  local adm_override = {
+    user     = kong_config.pg_admin_user,
+    password = kong_config.pg_admin_password,
+  }
+
+  local config_adm = utils.table_merge(config, adm_override)
+  local sem_admin, err = semaphore.new(1)
+  if not sem_admin then
+    ngx.log(ngx.CRIT, "failed creating the PostgreSQL migration connector semaphore: ",
+                      err)
+  end
+
+  self.config_adm = config_adm
+  self.sem_admin = sem_admin
 
   return setmetatable(self, _mt)
 end
